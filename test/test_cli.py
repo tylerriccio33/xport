@@ -10,11 +10,14 @@ from io import StringIO
 
 # Community Packages
 import pandas as pd
+import pytest
 
 # Xport Modules
 import xport
 
 from test.conftest import assert_dataset_equal  # noqa: E402
+
+pytestmark = pytest.mark.cli
 
 
 def test_help():

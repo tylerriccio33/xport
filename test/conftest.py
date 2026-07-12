@@ -14,6 +14,24 @@ import pytest
 import xport
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        '--skip-cli',
+        action='store_true',
+        default=False,
+        help='skip tests that exercise the command line interface',
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption('--skip-cli'):
+        return
+    skip_cli = pytest.mark.skip(reason='--skip-cli was given')
+    for item in items:
+        if 'cli' in item.keywords:
+            item.add_marker(skip_cli)
+
+
 def _scalar_equal(a, b):
     if isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b):
         return True
