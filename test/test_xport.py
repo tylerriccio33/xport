@@ -188,7 +188,7 @@ class TestDatasetMetadata:
             assert getattr(got, name) == getattr(expected, name)
         for k, v in expected.items():
             TestVariableMetadata.compare_metadata(got[k], v)
-        assert (got.contents == expected.contents).all(axis=None)
+        assert got.contents.rows(named=True) == expected.contents.rows(named=True)
 
     def test_init(self):
         """
@@ -239,9 +239,9 @@ class TestDatasetMetadata:
         ds['a'].vtype = xport.VariableType.NUMERIC
         ds['b'].vtype = xport.VariableType.CHARACTER
         got = ds.contents
-        assert list(got.index) == [1, 2, 3]
-        assert list(got['Label']) == ['', 'Beta', '']
-        assert list(got['Type']) == ['Numeric', 'Character', '']
+        assert got['#'].to_list() == [1, 2, 3]
+        assert got['Label'].to_list() == ['', 'Beta', '']
+        assert got['Type'].to_list() == ['Numeric', 'Character', '']
 
 
 class TestLibrary:

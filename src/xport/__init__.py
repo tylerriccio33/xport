@@ -15,8 +15,6 @@ from datetime import datetime
 from io import StringIO
 
 import narwhals as nw
-import pandas as pd
-import polars as pl
 
 from .__about__ import __version__  # noqa: F401 module imported but unused
 
@@ -298,6 +296,29 @@ def _coerce_unknown_dtypes(frame_or_series):
     return nw.from_native(native, eager_only=True)
 
 
+def _resolve_native_namespace(backend):
+    """
+    Resolve ``backend`` (a native module, ``nw.Implementation``, or backend
+    name like ``'polars'``) to its native dataframe module, via Narwhals'
+    own backend registry rather than importing the library ourselves.
+    """
+    if hasattr(backend, 'DataFrame'):
+        return backend
+    return nw.Implementation.from_backend(backend).to_native_namespace()
+
+
+def _native_series(ns, name, values, **kwds):
+    """
+    Construct a native series using ``ns``'s own calling convention.
+
+    ``ns`` is a caller-supplied native dataframe library (e.g. an explicit
+    ``native_namespace=`` argument), not one imported by this module.
+    """
+    if getattr(ns, '__name__', '') == 'polars':
+        return ns.Series(name=name, values=values, **kwds)
+    return ns.Series(values, name=name, **kwds)
+
+
 class Variable:
     """
     SAS variable.
@@ -378,21 +399,23 @@ class Variable:
             'format': format,
             'informat': informat,
         }
-        ns = native_namespace or pl
         if isinstance(data, Variable):
             native = data.to_native()
         elif isinstance(data, nw.Series):
             native = data.to_native()
         elif data is None:
-            native = ns.Series(name=name, values=[]) if ns is pl else ns.Series(name=name, dtype=None)
+            if native_namespace is None:
+                native = nw.from_dict({name or '': []}, backend='polars')[name or ''].to_native()
+            else:
+                native = _native_series(native_namespace, name, [])
         else:
             try:
                 native = nw.from_native(data, series_only=True).to_native()
             except TypeError:
-                native = (
-                    ns.Series(name=name, values=list(data), **kwds)
-                    if ns is pl else ns.Series(data, name=name, **kwds)
-                )
+                if native_namespace is None:
+                    native = nw.from_dict({name or '': list(data)}, backend='polars')[name or ''].to_native()
+                else:
+                    native = _native_series(native_namespace, name, list(data), **kwds)
         if name is not None and native.name != name:
             native = native.rename(name)
         self.__dict__['_series'] = _coerce_unknown_dtypes(nw.from_native(native, series_only=True))
@@ -439,9 +462,9 @@ class Variable:
             common = other_series.dtype if len(this_series) == 0 else this_series.dtype
             this_series = this_series.cast(common)
             other_series = other_series.cast(common)
-        ns = this_series.__native_namespace__()
-        native = ns.concat([this_series.to_native(), other_series.to_native()])
-        result = Variable(native)
+        other_series = other_series.rename(this_series.name)
+        combined = nw.concat([this_series.to_frame(), other_series.to_frame()], how='vertical')
+        result = Variable(combined[this_series.name])
         result.copy_metadata(self)
         return result
 
@@ -601,34 +624,29 @@ class Dataset:
             'sas_version': sas_version,
             'dataset_type': dataset_type,
         }
-        ns = native_namespace or pl
+        backend = native_namespace or 'polars'
         if isinstance(data, Dataset):
             native = data.to_native()
         elif isinstance(data, nw.DataFrame):
             native = data.to_native()
         elif data is None:
-            native = ns.DataFrame(**kwds)
+            native = _resolve_native_namespace(backend).DataFrame(**kwds)
         elif isinstance(data, Mapping):
             columns = {
                 k: v.to_native() if isinstance(v, (Variable, nw.Series)) else v
                 for k, v in data.items()
             }
-            if ns is pl:
-                # Polars infers a column's dtype from its first values, then
-                # raises rather than upcasting if a later value doesn't fit,
-                # e.g. int64 inferred from [0, 1, ...] followed by a float.
-                columns = {
-                    k: pl.Series(k, v, strict=False) if isinstance(v, list) else v
-                    for k, v in columns.items()
-                }
-            native = ns.DataFrame(columns, **kwds)
+            if columns:
+                native = nw.from_dict(columns, backend=backend, **kwds).to_native()
+            else:
+                native = _resolve_native_namespace(backend).DataFrame(**kwds)
         else:
             try:
                 native = nw.from_native(data, eager_only=True).to_native()
             except TypeError:
                 # Not already a recognized native dataframe; treat it as
                 # column/row data to build one from scratch.
-                native = ns.DataFrame(data, **kwds)
+                native = _resolve_native_namespace(backend).DataFrame(data, **kwds)
         self.__dict__['_frame'] = _coerce_unknown_dtypes(nw.from_native(native, eager_only=True))
         self._column_metadata = {}
         if isinstance(data, Dataset):
@@ -735,9 +753,8 @@ class Dataset:
             other_native = other
         other_frame = nw.from_native(other_native, eager_only=True)
         if other_frame.implementation != self._frame.implementation:
-            ns = self._frame.__native_namespace__()
-            other_frame = nw.from_native(
-                ns.DataFrame(other_frame.to_dict(as_series=False)), eager_only=True
+            other_frame = nw.from_dict(
+                other_frame.to_dict(as_series=False), backend=self._frame.implementation
             )
         combined = nw.concat([self._frame, other_frame], how='vertical')
         return self._wrap(combined)
@@ -747,24 +764,24 @@ class Dataset:
         """
         Variable metadata, such as label, format, number, and position.
         """
-        df = pd.DataFrame({
+        rows = [{
+            '#': i,
             'Variable': v.name,
             'Type': v.vtype.name.title() if v.vtype is not None else '',
             'Length': v.width,
             'Format': str(v.format) if v.format is not None else '',
             'Informat': str(v.informat) if v.informat is not None else '',
             'Label': v.label if v.label is not None else '',
-        } for k, v in self.items())
-        if df.empty:
-            return df
-        df.index = df.index + 1
-        df.index.name = '#'
-        # BUG: Pandas Series.cumsum() seems to fail on its new Int type;
-        #      thus we have a redundant conversion to Int64Dtype.
-        df['Position'] = df['Length'].cumsum().astype(pd.Int64Dtype())
-        df['Length'] = df['Length'].fillna(pd.NA).astype(pd.Int64Dtype())
-        df.loc[1, 'Position'] = 0
-        return df[['Variable', 'Type', 'Length', 'Position', 'Format', 'Informat', 'Label']]
+        } for i, (k, v) in enumerate(self.items(), start=1)]
+        columns = ['#', 'Variable', 'Type', 'Length', 'Format', 'Informat', 'Label']
+        data = {col: [row[col] for row in rows] for col in columns}
+        frame = nw.from_dict(data, backend=self._frame.implementation)
+        if frame.is_empty():
+            return frame
+        length = frame['Length'].cast(nw.Int64)
+        position = length.cum_sum().shift(1).scatter(0, 0).cast(nw.Int64)
+        frame = frame.with_columns(length.alias('Length'), position.alias('Position'))
+        return frame.select(['#', 'Variable', 'Type', 'Length', 'Position', 'Format', 'Informat', 'Label'])
 
     def infos(self):
         """
@@ -888,8 +905,7 @@ def from_columns(mapping, fp):
     text strings, including column labels, will be converted to bytes
     using the ISO-8859-1 encoding.
     """
-    df = pd.DataFrame(mapping)
-    return from_dataframe(df, fp)
+    return from_dataframe(mapping, fp)
 
 
 def from_rows(iterable, fp):
@@ -910,9 +926,21 @@ def from_rows(iterable, fp):
     text strings, including column labels, will be converted to bytes
     using the ISO-8859-1 encoding.
     """
-    df = pd.DataFrame(iterable)
-    df.columns = [f'x{i:02d}' if isinstance(i, int) else i for i in df]
-    return from_dataframe(df, fp)
+    rows = list(iterable)
+    first = rows[0] if rows else None
+    if first is None:
+        data = {}
+    elif isinstance(first, Mapping):
+        data = {k: [row[k] for row in rows] for k in first}
+    elif hasattr(first, '_fields'):
+        data = {k: [getattr(row, k) for row in rows] for k in first._fields}
+    else:
+        data = {f'x{i:02d}': [row[i] for row in rows] for i in range(len(first))}
+    if not data:
+        native = _resolve_native_namespace('polars').DataFrame()
+    else:
+        native = nw.from_dict(data, backend='polars').to_native()
+    return from_dataframe(native, fp)
 
 
 def from_dataframe(dataframe, fp):

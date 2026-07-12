@@ -21,7 +21,6 @@ from datetime import datetime
 
 # Community Packages
 import narwhals as nw
-import polars as pl
 
 # Xport Modules
 import xport
@@ -644,11 +643,17 @@ class Member(xport.Dataset):
         observations = Observations.from_bytes(mview[i:j], header)
 
         head = cls.from_header(header)
+        names = list(header)
         schema = {
-            name: pl.Float64 if namestr.vtype == xport.VariableType.NUMERIC else pl.String
+            name: nw.Float64() if namestr.vtype == xport.VariableType.NUMERIC else nw.String()
             for name, namestr in header.items()
         }
-        native = pl.DataFrame(list(observations), schema=schema, orient='row')
+        rows = list(observations)
+        if names:
+            columns = {name: [row[i] for row in rows] for i, name in enumerate(names)}
+            native = nw.from_dict(columns, schema=schema, backend='polars').to_native()
+        else:
+            native = xport._resolve_native_namespace('polars').DataFrame()
         data = Member(native)
         data.copy_metadata(head)
         for name in header:
