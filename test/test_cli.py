@@ -14,6 +14,8 @@ import pandas as pd
 # Xport Modules
 import xport
 
+from test.conftest import assert_dataset_equal  # noqa: E402
+
 
 def test_help():
     """
@@ -57,7 +59,7 @@ def test_decode(library, library_bytestring):
     fp = StringIO(proc.stdout.decode())
     df = pd.read_csv(fp)
     ds = xport.Dataset(df)
-    assert (ds == next(iter(library.values()))).all(axis=None)
+    assert_dataset_equal(ds, next(iter(library.values())), check_metadata=False)
 
 
 def test_output_file(library, library_bytestring, tmp_path):
@@ -71,4 +73,4 @@ def test_output_file(library, library_bytestring, tmp_path):
     with open(filepath) as f:
         df = pd.read_csv(f)
     ds = xport.Dataset(df)
-    assert (ds == next(iter(library.values()))).all(axis=None)
+    assert_dataset_equal(ds, next(iter(library.values())), check_metadata=False)

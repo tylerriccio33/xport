@@ -744,13 +744,6 @@ class Library(MutableMapping):
         """
         return len(self._members)
 
-    def __eq__(self, other):
-        """
-        Compare equality.
-        """
-        same_keys = set(self) == set(other)
-        same_values = all((self[k] == other[k]).all(axis=None) for k in self)
-        return same_keys and same_values
 
 
 ########################################################################

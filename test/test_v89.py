@@ -11,6 +11,8 @@ import pytest
 # Xport Modules
 import xport.v89
 
+from test.conftest import assert_dataset_equal  # noqa: E402
+
 
 @pytest.fixture()
 def library_bytestring():
@@ -141,8 +143,7 @@ class TestLibrary:
         got = xport.v89.loads(library_bytestring)
         assert len(got['DATASET']['Byte'].label) > 40
         assert got['DATASET']['Byte'].label == library['DATASET']['Byte'].label
-        assert ((got['DATASET'] == library['DATASET'])
-                | (got['DATASET'].isna() & library['DATASET'].isna())).all(axis=None)
+        assert_dataset_equal(got['DATASET'], library['DATASET'], check_metadata=False)
 
     def test_encode_labels(self, library, library_bytestring):
         """Test encoding long variable names and labels."""

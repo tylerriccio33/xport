@@ -15,6 +15,8 @@ import pytest
 import xport
 import xport.v56
 
+from test.conftest import assert_dataset_equal, assert_library_equal  # noqa: E402
+
 
 @pytest.fixture(scope='module')
 def library():
@@ -185,7 +187,7 @@ class TestObservations:
         header = xport.v56.MemberHeader.from_dataset(dataset)
         namestrs = header.namestrs
         obs = xport.v56.Observations.from_bytes(observations_bytestring, namestrs)
-        for got, expected in zip(obs, dataset.itertuples(index=False)):
+        for got, expected in zip(obs, dataset.iter_rows(named=False)):
             assert got == expected
 
     def test_encode(self, dataset, observations_bytestring):
@@ -202,10 +204,11 @@ class TestMember:
 
     def test_decode(self, dataset, dataset_bytestring):
         member = xport.v56.Member.from_bytes(dataset_bytestring)
-        assert (member == dataset).all(axis=None)
+        assert_dataset_equal(member, dataset, check_metadata=False)
         for name in dataset._metadata:
             assert getattr(member, name) == getattr(dataset, name), name
-        for k, v in dataset.items():
+        for k in dataset.columns:
+            v = dataset[k]
             u = member[k]
             for name in v._metadata:
                 assert getattr(u, name) == getattr(v, name), name
@@ -220,7 +223,7 @@ class TestLibrary:
 
     def test_decode(self, library, library_bytestring):
         got = xport.v56.Library.from_bytes(library_bytestring)
-        assert got == library
+        assert_library_equal(got, library)
 
     def test_encode(self, library, library_bytestring):
         with pytest.warns(UserWarning, match=r'Converting column dtypes'):
@@ -246,7 +249,7 @@ class TestLibrary:
         lib = xport.Library(pd.DataFrame({'a': [1]}))
         with pytest.warns(UserWarning, match=r'Converting column dtypes'):
             result = xport.v56.loads(xport.v56.dumps(lib))
-        assert (result[''] == lib[None]).all(axis=None)
+        assert_dataset_equal(result[''], lib[None], check_metadata=False)
 
     def test_no_observations(self):
         """
@@ -398,7 +401,7 @@ class TestEncode:
         dataset = xport.Dataset({'a': trouble}, name='trouble')
         library = xport.Library(dataset)
         with pytest.warns(UserWarning, match=r'Converting column dtypes'):
-            assert self.dump_and_load(library) == library
+            assert_library_equal(self.dump_and_load(library), library)
 
     def test_dataset_created(self):
         invalid = datetime(1800, 1, 1)
