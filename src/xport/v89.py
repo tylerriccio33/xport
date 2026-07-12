@@ -282,7 +282,7 @@ def load(fp):
     """
     Deserialize a dataset library from a SAS Transport v8 (XPT) file.
 
-        >>> with open('test/data/example.v8xpt', 'rb') as file:
+        >>> with open('test/data/doctest.v8xpt', 'rb') as file:
         ...     library = load(file)
     """
     try:
@@ -296,7 +296,7 @@ def loads(bytestring):
     """
     Deserialize a dataset library from an XPORT-format string.
 
-        >>> with open('test/data/example.v8xpt', 'rb') as file:
+        >>> with open('test/data/doctest.v8xpt', 'rb') as file:
         ...     bytestring = file.read()
         >>> library = loads(bytestring)
     """

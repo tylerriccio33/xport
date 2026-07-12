@@ -613,6 +613,14 @@ class Dataset:
                 k: v.to_native() if isinstance(v, (Variable, nw.Series)) else v
                 for k, v in data.items()
             }
+            if ns is pl:
+                # Polars infers a column's dtype from its first values, then
+                # raises rather than upcasting if a later value doesn't fit,
+                # e.g. int64 inferred from [0, 1, ...] followed by a float.
+                columns = {
+                    k: pl.Series(k, v, strict=False) if isinstance(v, list) else v
+                    for k, v in columns.items()
+                }
             native = ns.DataFrame(columns, **kwds)
         else:
             try:

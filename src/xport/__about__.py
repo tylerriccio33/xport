@@ -13,9 +13,7 @@ Project metadata, such as the current version number.
 # Standard Library
 import pathlib
 from collections import namedtuple
-
-# Community Packages
-from pkg_resources import DistributionNotFound, get_distribution
+from importlib.metadata import PackageNotFoundError, version
 
 __all__ = [
     '__version__',
@@ -37,6 +35,6 @@ class Version(namedtuple('Version', 'major minor patch')):
 
 project = pathlib.Path(__file__).parent.name
 try:
-    __version__ = Version.parse(get_distribution(project).version)
-except DistributionNotFound:
+    __version__ = Version.parse(version(project))
+except PackageNotFoundError:
     __version__ = None
