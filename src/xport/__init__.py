@@ -4,6 +4,7 @@ Read and write SAS XPORT/XPT-format files.
 
 # Standard Library
 import enum
+import importlib
 import logging
 import re
 import string
@@ -296,12 +297,35 @@ def _coerce_unknown_dtypes(frame_or_series):
     return nw.from_native(native, eager_only=True)
 
 
-def _resolve_native_namespace(backend):
+def _default_backend():
     """
-    Resolve ``backend`` (a native module, ``nw.Implementation``, or backend
-    name like ``'polars'``) to its native dataframe module, via Narwhals'
-    own backend registry rather than importing the library ourselves.
+    Pick a native dataframe library to build a frame from scratch with,
+    when the caller hasn't supplied one (e.g. ``Dataset()``, ``Dataset({...})``).
     """
+    for getter in (nw.dependencies.get_polars, nw.dependencies.get_pandas):
+        module = getter()
+        if module is not None:
+            return module
+    for name in ('polars', 'pandas'):
+        try:
+            return importlib.import_module(name)
+        except ImportError:
+            continue
+    raise ImportError(
+        'xport needs Polars or Pandas installed to build a dataset from plain '
+        'Python data; install one of them, e.g. `pip install polars`.'
+    )
+
+
+def _resolve_native_namespace(backend=None):
+    """
+    Resolve ``backend`` (a native module, ``nw.Implementation``, backend name
+    like ``'polars'``, or ``None``) to its native dataframe module, via
+    Narwhals' own backend registry rather than importing the library
+    ourselves.
+    """
+    if backend is None:
+        return _default_backend()
     if hasattr(backend, 'DataFrame'):
         return backend
     return nw.Implementation.from_backend(backend).to_native_namespace()
@@ -404,18 +428,13 @@ class Variable:
         elif isinstance(data, nw.Series):
             native = data.to_native()
         elif data is None:
-            if native_namespace is None:
-                native = nw.from_dict({name or '': []}, backend='polars')[name or ''].to_native()
-            else:
-                native = _native_series(native_namespace, name, [])
+            native = _native_series(_resolve_native_namespace(native_namespace), name, [])
         else:
             try:
                 native = nw.from_native(data, series_only=True).to_native()
             except TypeError:
-                if native_namespace is None:
-                    native = nw.from_dict({name or '': list(data)}, backend='polars')[name or ''].to_native()
-                else:
-                    native = _native_series(native_namespace, name, list(data), **kwds)
+                ns = _resolve_native_namespace(native_namespace)
+                native = _native_series(ns, name, list(data), **kwds)
         if name is not None and native.name != name:
             native = native.rename(name)
         self.__dict__['_series'] = _coerce_unknown_dtypes(nw.from_native(native, series_only=True))
@@ -624,29 +643,37 @@ class Dataset:
             'sas_version': sas_version,
             'dataset_type': dataset_type,
         }
-        backend = native_namespace or 'polars'
         if isinstance(data, Dataset):
             native = data.to_native()
         elif isinstance(data, nw.DataFrame):
             native = data.to_native()
         elif data is None:
-            native = _resolve_native_namespace(backend).DataFrame(**kwds)
+            native = _resolve_native_namespace(native_namespace).DataFrame(**kwds)
         elif isinstance(data, Mapping):
             columns = {
                 k: v.to_native() if isinstance(v, (Variable, nw.Series)) else v
                 for k, v in data.items()
             }
             if columns:
-                native = nw.from_dict(columns, backend=backend, **kwds).to_native()
+                ns = _resolve_native_namespace(native_namespace)
+                if getattr(ns, '__name__', '') == 'polars':
+                    # Polars infers a column's dtype from its first values, then
+                    # raises rather than upcasting if a later value doesn't fit,
+                    # e.g. int64 inferred from [0, 1, ...] followed by a float/NaN.
+                    columns = {
+                        k: ns.Series(k, v, strict=False) if isinstance(v, list) else v
+                        for k, v in columns.items()
+                    }
+                native = nw.from_dict(columns, backend=ns, **kwds).to_native()
             else:
-                native = _resolve_native_namespace(backend).DataFrame(**kwds)
+                native = _resolve_native_namespace(native_namespace).DataFrame(**kwds)
         else:
             try:
                 native = nw.from_native(data, eager_only=True).to_native()
             except TypeError:
                 # Not already a recognized native dataframe; treat it as
                 # column/row data to build one from scratch.
-                native = _resolve_native_namespace(backend).DataFrame(data, **kwds)
+                native = _resolve_native_namespace(native_namespace).DataFrame(data, **kwds)
         self.__dict__['_frame'] = _coerce_unknown_dtypes(nw.from_native(native, eager_only=True))
         self._column_metadata = {}
         if isinstance(data, Dataset):
@@ -778,8 +805,16 @@ class Dataset:
         frame = nw.from_dict(data, backend=self._frame.implementation)
         if frame.is_empty():
             return frame
-        length = frame['Length'].cast(nw.Int64)
-        position = length.cum_sum().shift(1).scatter(0, 0).cast(nw.Int64)
+        length = frame['Length']
+        try:
+            length = length.cast(nw.Int64)
+        except (TypeError, ValueError):
+            pass  # A backend (e.g. Pandas) can't hold nulls in a plain integer column.
+        position = length.cum_sum().shift(1).scatter(0, 0)
+        try:
+            position = position.cast(nw.Int64)
+        except (TypeError, ValueError):
+            pass
         frame = frame.with_columns(length.alias('Length'), position.alias('Position'))
         return frame.select(['#', 'Variable', 'Type', 'Length', 'Position', 'Format', 'Informat', 'Label'])
 
@@ -936,10 +971,11 @@ def from_rows(iterable, fp):
         data = {k: [getattr(row, k) for row in rows] for k in first._fields}
     else:
         data = {f'x{i:02d}': [row[i] for row in rows] for i in range(len(first))}
+    ns = _resolve_native_namespace(None)
     if not data:
-        native = _resolve_native_namespace('polars').DataFrame()
+        native = ns.DataFrame()
     else:
-        native = nw.from_dict(data, backend='polars').to_native()
+        native = nw.from_dict(data, backend=ns).to_native()
     return from_dataframe(native, fp)
 
 

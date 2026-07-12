@@ -9,7 +9,6 @@ import subprocess
 from io import StringIO
 
 # Community Packages
-import pandas as pd
 import pytest
 
 # Xport Modules
@@ -56,6 +55,7 @@ def test_decode(library, library_bytestring):
     """
     Verify the command line executable can decode a library.
     """
+    pd = pytest.importorskip('pandas')
     cmd = 'python -m xport -'
     argv = cmd.split()
     proc = subprocess.run(argv, capture_output=True, input=library_bytestring)
@@ -69,6 +69,7 @@ def test_output_file(library, library_bytestring, tmp_path):
     """
     Verify CLI can write output to a file.
     """
+    pd = pytest.importorskip('pandas')
     filepath = tmp_path / 'tmp.csv'
     cmd = f'python -m xport - {filepath}'
     argv = cmd.split()

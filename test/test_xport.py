@@ -8,7 +8,6 @@ import string
 from io import BytesIO
 
 # Community Packages
-import pandas as pd
 import pytest
 
 # Xport Modules
@@ -211,13 +210,18 @@ class TestDatasetMetadata:
             label='Example',
         )
         self.compare_metadata(ds.copy(), ds)
-        self.compare_metadata(
-            ds.append(pd.DataFrame({
-                'a': [2],
-                'b': ['y'],
-            })),
-            ds,
-        )
+        try:
+            import pandas as pd
+        except ImportError:
+            pass
+        else:
+            self.compare_metadata(
+                ds.append(pd.DataFrame({
+                    'a': [2],
+                    'b': ['y'],
+                })),
+                ds,
+            )
         # ``Dataset`` no longer subclasses ``pd.DataFrame`` (Narwhals is
         # composed, not inherited), so ``pd.concat`` doesn't apply here;
         # ``Dataset.append`` is the supported equivalent.
@@ -266,6 +270,7 @@ class TestLibrary:
             xport.Library([xport.Dataset(), xport.Dataset()])
 
     def test_create_from_dataframe(self):
+        pd = pytest.importorskip('pandas')
         lib = xport.Library(pd.DataFrame())
         assert None in lib
 

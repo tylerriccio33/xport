@@ -649,11 +649,12 @@ class Member(xport.Dataset):
             for name, namestr in header.items()
         }
         rows = list(observations)
+        ns = xport._resolve_native_namespace(None)
         if names:
             columns = {name: [row[i] for row in rows] for i, name in enumerate(names)}
-            native = nw.from_dict(columns, schema=schema, backend='polars').to_native()
+            native = nw.from_dict(columns, schema=schema, backend=ns).to_native()
         else:
-            native = xport._resolve_native_namespace('polars').DataFrame()
+            native = ns.DataFrame()
         data = Member(native)
         data.copy_metadata(head)
         for name in header:

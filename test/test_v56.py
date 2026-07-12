@@ -9,7 +9,6 @@ from datetime import datetime
 
 # Community Packages
 import narwhals as nw
-import pandas as pd
 import pytest
 
 # Xport Modules
@@ -247,6 +246,7 @@ class TestLibrary:
         xport.v56.Library.from_bytes(bytestring)
 
     def test_dataframe(self):
+        pd = pytest.importorskip('pandas')
         lib = xport.Library(pd.DataFrame({'a': [1]}))
         with pytest.warns(UserWarning, match=r'Converting column dtypes'):
             result = xport.v56.loads(xport.v56.dumps(lib))
@@ -343,6 +343,7 @@ class TestEncode:
 
     def test_text_null(self):
         # https://github.com/selik/xport/issues/44
+        pd = pytest.importorskip('pandas')
         df = pd.DataFrame({
             'a': pd.Series([None], dtype='string'),
             'b': [0],  # Avoid issue #46 by including a numeric column.
@@ -397,6 +398,7 @@ class TestEncode:
         """
         Some text patterns have been trouble in the past.
         """
+        pd = pytest.importorskip('pandas')
         trouble = xport.Variable(["'<>"], dtype='string', native_namespace=pd)
         dataset = xport.Dataset({'a': trouble}, name='trouble', native_namespace=pd)
         library = xport.Library(dataset)
