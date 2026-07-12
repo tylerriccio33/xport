@@ -276,18 +276,13 @@ class Format(Informat):
         return super().__eq__(other) and self.justify == other.justify
 
 
-# The Pandas documentation suggests avoiding inheritance, but their
-# other options for extending ``Series`` objects fall flat, because so
-# many Pandas methods return new instances.  To carry variable metadata
-# over to the new instances, we need to overrride the constructors.
-# https://pandas.pydata.org/pandas-docs/stable/development/extending.html
 
 
-class Variable(pd.Series):
+class Variable(nw.Series):
     """
     SAS variable.
 
-    ``Variable`` extends Pandas' ``Series``, adding SAS metadata.
+    ``Variable`` extends Narwhals' ``Series``, adding SAS metadata.
     """
 
     _metadata = [
@@ -315,16 +310,14 @@ class Variable(pd.Series):
         metadata = (name.strip('_') for name in self._metadata)
         metadata = {name: getattr(self, name, None) for name in metadata}
         metadata = (f'{name}: {value}' for name, value in metadata.items() if value is not None)
-        return f'{type(self).__name__}\n{super().__repr__()}\n{", ".join(metadata)}'
+        return f'{type(self).__name__}\n{repr(self.to_native())}\n{", ".join(metadata)}'
 
     def __init__(
         self,
         data=None,
-        index=None,
-        dtype=None,
+        *,
         name=None,
-        copy=False,
-        fastpath=False,
+        native_namespace=None,
         label=None,
         vtype=None,
         width=None,
@@ -343,7 +336,33 @@ class Variable(pd.Series):
             'format': format,
             'informat': informat,
         }
-        super().__init__(data, index, dtype, name, copy, fastpath, **kwds)
+        if hasattr(data, '__narwhals_series__'):
+            # Narwhals is reconstructing us internally, e.g. via
+            # ``ds['x']``: ``data`` is already a compliant series, not a
+            # native one, and ``kwds`` carries the ``level`` it wants.
+            super().__init__(data, **kwds)
+            for name, value in metadata.items():
+                if value is not None:
+                    setattr(self, name, value)
+            LOG.debug(f'Initialized {self}')
+            return
+        ns = native_namespace or pl
+        if isinstance(data, Variable):
+            native = data.to_native()
+        elif data is None:
+            native = ns.Series(name=name, values=[]) if ns is pl else ns.Series(name=name, dtype=None)
+        else:
+            try:
+                native = nw.from_native(data, series_only=True).to_native()
+            except TypeError:
+                native = (
+                    ns.Series(name=name, values=list(data), **kwds)
+                    if ns is pl else ns.Series(data, name=name, **kwds)
+                )
+        if name is not None and native.name != name:
+            native = native.rename(name)
+        wrapped = nw.from_native(native, series_only=True)
+        super().__init__(wrapped._compliant_series, level=wrapped._level)
         for name, value in metadata.items():
             if value is not None:
                 setattr(self, name, value)
@@ -352,35 +371,15 @@ class Variable(pd.Series):
             setattr(self, name, getattr(self, name, value))
         LOG.debug(f'Initialized {self}')
 
-    def __finalize__(self, other, method=None, **kwds):
+    def _from_compliant_series(self, series):
         """
-        Extend Series finalize to handle more methods.
+        Construct a new ``Variable``, preserving SAS metadata.
         """
-        self = super().__finalize__(other, method, **kwds)
-        if method == 'concat':
-            first, *rest = other.objs
-            source = first
-        else:
-            source = other
-        self.copy_metadata(source)
-        LOG.debug(f'Finalized {self}')
-        return self
-
-    @property
-    def _constructor(self):
-        """
-        Construct an instance with the same dimensions as the original.
-        """
-        return Variable
-
-    @property
-    def _constructor_expanddim(self):
-        """
-        Construct an instance with an extra dimension.
-
-        For example, transforming a series into a dataframe.
-        """
-        return pd.DataFrame
+        obj = object.__new__(Variable)
+        nw.Series.__init__(obj, series, level=self._level)
+        for attr in self._metadata:
+            setattr(obj, attr, getattr(self, attr, None))
+        return obj
 
     @property
     def format(self):
@@ -544,13 +543,23 @@ class Dataset(nw.DataFrame):
 
     def _from_compliant_dataframe(self, df):
         """
-        Construct a new ``Dataset``, preserving SAS metadata.)``.
+        Construct a new ``Dataset``, preserving SAS metadata.
+
+        This is Narwhals' hook (analogous to Pandas' ``_constructor``) for
+        building the result of operations like ``.select()``/``.filter()``.
         """
         obj = object.__new__(Dataset)
         nw.DataFrame.__init__(obj, df, level=self._level)
         for attr in self._metadata:
             setattr(obj, attr, getattr(self, attr, None))
         return obj
+
+    @property
+    def _series(self):
+        """
+        The class used for a single column, e.g. ``ds['x']``.
+        """
+        return Variable
 
     def infos(self):
         """
