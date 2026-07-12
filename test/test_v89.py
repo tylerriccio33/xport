@@ -11,6 +11,8 @@ import pytest
 # Xport Modules
 import xport.v89
 
+from test.conftest import assert_dataset_equal  # noqa: E402
+
 
 @pytest.fixture()
 def library_bytestring():
@@ -94,9 +96,11 @@ def library():
         data={
             'Float': [0, 1, 9227469 / 8388608, float('nan')],
             'Double': [0, 1, 1.1, float('nan')],
-            'Long': [0, 1, 2, None],
-            'Int': [0, 1, 2, None],
-            'Byte': [0, 1, 2, None],
+            # SAS numerics are always 8-byte floats, so missing values
+            # decode to NaN, not None -- match that here for comparison.
+            'Long': [0, 1, 2, float('nan')],
+            'Int': [0, 1, 2, float('nan')],
+            'Byte': [0, 1, 2, float('nan')],
             'Str': ['a', '1', '\N{snowman}'.encode().decode('ISO-8859-1'), ''],
         },
         name='DATASET',
@@ -141,8 +145,7 @@ class TestLibrary:
         got = xport.v89.loads(library_bytestring)
         assert len(got['DATASET']['Byte'].label) > 40
         assert got['DATASET']['Byte'].label == library['DATASET']['Byte'].label
-        assert ((got['DATASET'] == library['DATASET'])
-                | (got['DATASET'].isna() & library['DATASET'].isna())).all(axis=None)
+        assert_dataset_equal(got['DATASET'], library['DATASET'], check_metadata=False)
 
     def test_encode_labels(self, library, library_bytestring):
         """Test encoding long variable names and labels."""

@@ -20,7 +20,7 @@ from collections.abc import Iterator, Mapping
 from datetime import datetime
 
 # Community Packages
-import pandas as pd
+import narwhals as nw
 
 # Xport Modules
 import xport
@@ -136,13 +136,13 @@ class Namestr:
         """
         if variable.vtype is not None:
             vtype = variable.vtype
-        elif variable.dtype.kind in {'f', 'i'}:
-            vtype = xport.VariableType.NUMERIC
-        elif variable.dtype.kind == 'O':
-            vtype = xport.VariableType.CHARACTER
-        elif variable.dtype.kind == 'b':
+        elif variable.dtype == nw.Boolean:
             # We'll encode Boolean columns as 1 if True else 0.
             vtype = xport.VariableType.NUMERIC
+        elif variable.dtype.is_numeric():
+            vtype = xport.VariableType.NUMERIC
+        elif variable.dtype == nw.String:
+            vtype = xport.VariableType.CHARACTER
         else:
             raise TypeError(f'{type(variable).__name__}.dtype {variable.dtype} not supported')
 
@@ -151,8 +151,21 @@ class Namestr:
         elif vtype == xport.VariableType.NUMERIC:
             length = 8
         else:
-            # TODO: Avoid encoding twice, once here and once in ``Observations``.
-            length = variable.str.encode(TEXT_DATA_ENCODING).str.len().max()
+            # Width is the encoded byte count, which can exceed the
+            # character count for multi-byte encodings (e.g. UTF-8).
+            # TODO: Avoid this pass, since ``Observations`` re-scans too.
+            def encoded_length(v):
+                try:
+                    return len(v.encode(TEXT_DATA_ENCODING))
+                except UnicodeEncodeError:
+                    # Leave it to the actual write step to raise; here we
+                    # just need a stand-in width.
+                    return len(v)
+
+            length = max(
+                (encoded_length(v) for v in variable.to_list() if isinstance(v, str)),
+                default=0,
+            )
         try:
             length = max(1, length)  # We need at least 1 byte per value.
         except TypeError:
@@ -380,7 +393,8 @@ class MemberHeader(Mapping):
         """
         namestrs = []
         p = 0
-        for i, (k, v) in enumerate(dataset.items(), variable_enumeration_start):
+        for i, k in enumerate(dataset.columns, variable_enumeration_start):
+            v = dataset[k]
             ns = Namestr.from_variable(v, number=i)
             ns.position = p
             p += ns.length
@@ -492,7 +506,7 @@ class Observations(Iterator):
         Yield observations from an ``xport.Dataset``.
         """
         return cls(
-            observations=dataset.itertuples(index=False, name='Observation'),
+            observations=dataset.iter_rows(named=False),
             header=MemberHeader.from_dataset(dataset),
         )
 
@@ -628,11 +642,23 @@ class Member(xport.Dataset):
         header = MemberHeader.from_bytes(mview[:i])
         observations = Observations.from_bytes(mview[i:j], header)
 
-        # This awkwardness works around Pandas subclasses misbehaving.
-        # ``DataFrame.append`` discards subclass attributes.  Lame.
         head = cls.from_header(header)
-        data = Member(pd.DataFrame.from_records(observations, columns=list(header)))
+        names = list(header)
+        schema = {
+            name: nw.Float64() if namestr.vtype == xport.VariableType.NUMERIC else nw.String()
+            for name, namestr in header.items()
+        }
+        rows = list(observations)
+        ns = xport._resolve_native_namespace(None)
+        if names:
+            columns = {name: [row[i] for row in rows] for i, name in enumerate(names)}
+            native = nw.from_dict(columns, schema=schema, backend=ns).to_native()
+        else:
+            native = ns.DataFrame()
+        data = Member(native)
         data.copy_metadata(head)
+        for name in header:
+            data._column_metadata[name] = dict(head._column_metadata.get(name, {}))
         LOG.info(f'Decoded XPORT dataset {data.name!r}')
         LOG.debug('%s', data)
         return data
@@ -645,31 +671,20 @@ class Member(xport.Dataset):
 
     def _bytes(self, MemberHeader=MemberHeader, Observations=Observations):
         LOG.debug(f'Encode {type(self).__name__}')
-        dtype_kind_conversions = {
-            'O': 'string',
-            'b': 'float',
-            'i': 'float',
-        }
-        dtypes = self.dtypes.to_dict()
         conversions = {}
-        for column, dtype in dtypes.items():
-            try:
-                conversions[column] = dtype_kind_conversions[dtype.kind]
-            except KeyError:
-                continue
+        for column, dtype in self.schema.items():
+            if dtype == nw.Boolean or (dtype.is_numeric() and dtype not in (nw.Float32, nw.Float64)):
+                conversions[column] = nw.Float64
+            elif not dtype.is_numeric() and dtype != nw.String:
+                conversions[column] = nw.String
         if conversions:
             warnings.warn(f'Converting column dtypes {conversions}')
-            # BUG: ``DataFrame.copy`` mutates and discards ``Variable`` metadata.
-            # self = self.copy()  # Don't mutate!
-            cpy = xport.Dataset({k: v for k, v in self.items()})
-            for column, dtype in conversions.items():
-                LOG.warning(f'Converting column {column!r} from {dtypes[column]} to {dtype}')
-                try:
-                    cpy[column] = cpy[column].astype(dtype)
-                except Exception:
-                    raise TypeError(f'Could not coerce column {column!r} to {dtype}')
-            cpy.copy_metadata(self)
-            self = cpy
+            try:
+                self = self.with_columns(
+                    nw.col(column).cast(dtype) for column, dtype in conversions.items()
+                )
+            except Exception:
+                raise TypeError(f'Could not coerce columns {conversions}')
         header = bytes(MemberHeader.from_dataset(self))
         observations = bytes(Observations.from_dataset(self))
         return header + observations
@@ -957,7 +972,7 @@ def load(fp):
     return loads(bytestring)
 
 
-def loads(bytestring):
+def loads(bytestring, native_namespace=None):
     """
     Deserialize a SAS dataset library from an XPORT-format string.
 
@@ -965,7 +980,11 @@ def loads(bytestring):
         ...     bytestring = f.read()
         >>> library = loads(bytestring)
     """
-    return Library.from_bytes(bytestring)
+    library = Library.from_bytes(bytestring)
+    if native_namespace is not None:
+        for name in library:
+            library._members[name] = library[name].to_native()
+    return library
 
 
 def dump(library, fp):

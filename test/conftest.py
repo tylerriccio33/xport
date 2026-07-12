@@ -3,13 +3,71 @@ Shared test fixtures.
 """
 
 # Standard Library
+import math
 from datetime import datetime
 
 # Community Packages
+import narwhals as nw
 import pytest
 
 # Xport Modules
 import xport
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        '--skip-cli',
+        action='store_true',
+        default=False,
+        help='skip tests that exercise the command line interface',
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption('--skip-cli'):
+        return
+    skip_cli = pytest.mark.skip(reason='--skip-cli was given')
+    for item in items:
+        if 'cli' in item.keywords:
+            item.add_marker(skip_cli)
+
+
+def _scalar_equal(a, b):
+    if isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b):
+        return True
+    return a == b
+
+
+def assert_dataset_equal(a, b, *, check_metadata=True):
+    """
+    Compare two ``xport.Dataset``.
+    """
+    __tracebackhide__ = True
+    assert list(a.columns) == list(b.columns), (list(a.columns), list(b.columns))
+    da = nw.from_native(a.to_native(), eager_only=True).to_dict(as_series=False)
+    db = nw.from_native(b.to_native(), eager_only=True).to_dict(as_series=False)
+    for column in a.columns:
+        left, right = da[column], db[column]
+        assert len(left) == len(right), column
+        for x, y in zip(left, right):
+            assert _scalar_equal(x, y), (column, x, y)
+    if check_metadata:
+        for name in xport.Dataset._metadata:
+            assert getattr(a, name, None) == getattr(b, name, None), name
+        for column in a.columns:
+            for name in xport.Variable._metadata:
+                assert getattr(a[column], name, None) == getattr(b[column], name, None), \
+                    (column, name)
+
+
+def assert_library_equal(a, b, **kwds):
+    """
+    Compare two ``xport.Library``, regardless of members' native backend.
+    """
+    __tracebackhide__ = True
+    assert set(a) == set(b), (set(a), set(b))
+    for name in a:
+        assert_dataset_equal(a[name], b[name], **kwds)
 
 
 @pytest.fixture(scope='session')  # Take care not to mutate!

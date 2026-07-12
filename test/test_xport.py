@@ -8,11 +8,12 @@ import string
 from io import BytesIO
 
 # Community Packages
-import pandas as pd
 import pytest
 
 # Xport Modules
 import xport
+
+from test.conftest import assert_dataset_equal  # noqa: E402
 
 
 class TestNaN:
@@ -186,7 +187,7 @@ class TestDatasetMetadata:
             assert getattr(got, name) == getattr(expected, name)
         for k, v in expected.items():
             TestVariableMetadata.compare_metadata(got[k], v)
-        assert (got.contents == expected.contents).all(axis=None)
+        assert got.contents.rows(named=True) == expected.contents.rows(named=True)
 
     def test_init(self):
         """
@@ -209,14 +210,22 @@ class TestDatasetMetadata:
             label='Example',
         )
         self.compare_metadata(ds.copy(), ds)
-        self.compare_metadata(
-            ds.append(pd.DataFrame({
-                'a': [2],
-                'b': ['y'],
-            })),
-            ds,
-        )
-        self.compare_metadata(pd.concat([ds, ds]), ds)
+        try:
+            import pandas as pd
+        except ImportError:
+            pass
+        else:
+            self.compare_metadata(
+                ds.append(pd.DataFrame({
+                    'a': [2],
+                    'b': ['y'],
+                })),
+                ds,
+            )
+        # ``Dataset`` no longer subclasses ``pd.DataFrame`` (Narwhals is
+        # composed, not inherited), so ``pd.concat`` doesn't apply here;
+        # ``Dataset.append`` is the supported equivalent.
+        self.compare_metadata(ds.append(ds), ds)
 
     def test_contents(self):
         """
@@ -234,9 +243,9 @@ class TestDatasetMetadata:
         ds['a'].vtype = xport.VariableType.NUMERIC
         ds['b'].vtype = xport.VariableType.CHARACTER
         got = ds.contents
-        assert list(got.index) == [1, 2, 3]
-        assert list(got['Label']) == ['', 'Beta', '']
-        assert list(got['Type']) == ['Numeric', 'Character', '']
+        assert got['#'].to_list() == [1, 2, 3]
+        assert got['Label'].to_list() == ['', 'Beta', '']
+        assert got['Type'].to_list() == ['Numeric', 'Character', '']
 
 
 class TestLibrary:
@@ -261,6 +270,7 @@ class TestLibrary:
             xport.Library([xport.Dataset(), xport.Dataset()])
 
     def test_create_from_dataframe(self):
+        pd = pytest.importorskip('pandas')
         lib = xport.Library(pd.DataFrame())
         assert None in lib
 
@@ -274,23 +284,26 @@ class TestLegacy:
 
     def test_from_columns(self, library):
         ds = next(iter(library.values()))
-        mapping = {k: v for k, v in ds.items()}
+        mapping = {k: v.to_native() for k, v in zip(ds.columns, (ds[c] for c in ds.columns))}
         fp = BytesIO()
         with pytest.warns(DeprecationWarning):
             xport.from_columns(mapping, fp)
         fp.seek(0)
         result = next(iter(xport.v56.load(fp).values()))
-        assert (result == ds).all(axis=None)
+        assert_dataset_equal(result, ds, check_metadata=False)
 
     def test_from_rows(self, library):
         ds = next(iter(library.values()))
-        rows = list(ds.itertuples(index=None, name=None))
+        rows = list(ds.iter_rows(named=False))
         fp = BytesIO()
         with pytest.warns(DeprecationWarning):
             xport.from_rows(rows, fp)
         fp.seek(0)
         result = next(iter(xport.v56.load(fp).values()))
-        assert (result.values == ds.values).all(axis=None)
+        # Unnamed rows can't carry column names, so ``from_rows`` invents
+        # generic ones (x00, x01, ...); rename them back for comparison.
+        result = xport.Dataset(result.rename(dict(zip(result.columns, ds.columns))))
+        assert_dataset_equal(result, ds, check_metadata=False)
 
     def test_from_dataframe(self, library):
         ds = next(iter(library.values()))
@@ -299,34 +312,33 @@ class TestLegacy:
             xport.from_dataframe(ds, fp)
         fp.seek(0)
         result = next(iter(xport.v56.load(fp).values()))
-        assert (result == ds).all(axis=None)
+        assert_dataset_equal(result, ds, check_metadata=False)
 
     def test_to_rows(self, library, library_bytestring):
         ds = next(iter(library.values()))
         fp = BytesIO(library_bytestring)
         with pytest.warns(DeprecationWarning):
             result = xport.to_rows(fp)
-        df = pd.DataFrame(result)
-        assert (df.values == ds.values).all(axis=None)
+        assert result == list(ds.iter_rows(named=False))
 
     def test_to_columns(self, library, library_bytestring):
         ds = next(iter(library.values()))
         fp = BytesIO(library_bytestring)
         with pytest.warns(DeprecationWarning):
             result = xport.to_columns(fp)
-        df = pd.DataFrame(result)
-        assert (df == ds).all(axis=None)
+        expected = {c: ds[c].to_list() for c in ds.columns}
+        assert {k: list(v) for k, v in result.items()} == expected
 
     def test_to_numpy(self, library, library_bytestring):
         ds = next(iter(library.values()))
         fp = BytesIO(library_bytestring)
         with pytest.warns(DeprecationWarning):
             result = xport.to_numpy(fp)
-        assert (result == ds.values).all(axis=None)
+        assert (result == ds.to_numpy()).all()
 
     def test_to_dataframe(self, library, library_bytestring):
         ds = next(iter(library.values()))
         fp = BytesIO(library_bytestring)
         with pytest.warns(DeprecationWarning):
             result = xport.to_dataframe(fp)
-        assert (result == ds).all(axis=None)
+        assert_dataset_equal(result, ds, check_metadata=False)

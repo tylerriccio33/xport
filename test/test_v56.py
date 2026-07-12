@@ -8,12 +8,14 @@ import string
 from datetime import datetime
 
 # Community Packages
-import pandas as pd
+import narwhals as nw
 import pytest
 
 # Xport Modules
 import xport
 import xport.v56
+
+from test.conftest import assert_dataset_equal, assert_library_equal  # noqa: E402
 
 
 @pytest.fixture(scope='module')
@@ -185,7 +187,7 @@ class TestObservations:
         header = xport.v56.MemberHeader.from_dataset(dataset)
         namestrs = header.namestrs
         obs = xport.v56.Observations.from_bytes(observations_bytestring, namestrs)
-        for got, expected in zip(obs, dataset.itertuples(index=False)):
+        for got, expected in zip(obs, dataset.iter_rows(named=False)):
             assert got == expected
 
     def test_encode(self, dataset, observations_bytestring):
@@ -202,10 +204,11 @@ class TestMember:
 
     def test_decode(self, dataset, dataset_bytestring):
         member = xport.v56.Member.from_bytes(dataset_bytestring)
-        assert (member == dataset).all(axis=None)
+        assert_dataset_equal(member, dataset, check_metadata=False)
         for name in dataset._metadata:
             assert getattr(member, name) == getattr(dataset, name), name
-        for k, v in dataset.items():
+        for k in dataset.columns:
+            v = dataset[k]
             u = member[k]
             for name in v._metadata:
                 assert getattr(u, name) == getattr(v, name), name
@@ -220,7 +223,7 @@ class TestLibrary:
 
     def test_decode(self, library, library_bytestring):
         got = xport.v56.Library.from_bytes(library_bytestring)
-        assert got == library
+        assert_library_equal(got, library)
 
     def test_encode(self, library, library_bytestring):
         with pytest.warns(UserWarning, match=r'Converting column dtypes'):
@@ -243,10 +246,11 @@ class TestLibrary:
         xport.v56.Library.from_bytes(bytestring)
 
     def test_dataframe(self):
+        pd = pytest.importorskip('pandas')
         lib = xport.Library(pd.DataFrame({'a': [1]}))
         with pytest.warns(UserWarning, match=r'Converting column dtypes'):
             result = xport.v56.loads(xport.v56.dumps(lib))
-        assert (result[''] == lib[None]).all(axis=None)
+        assert_dataset_equal(result[''], lib[None], check_metadata=False)
 
     def test_no_observations(self):
         """
@@ -334,11 +338,12 @@ class TestEncode:
             with pytest.warns(UserWarning, match=r'Converting column dtypes'):
                 library = xport.Library({'A': xport.Dataset({'x': [x]})})
                 output = self.dump_and_load(library)
-                assert output['A']['x'].dtype.name == 'float64'
-                assert output['A']['x'].iloc[0] == 1.0
+                assert output['A']['x'].dtype == nw.Float64
+                assert output['A']['x'][0] == 1.0
 
     def test_text_null(self):
         # https://github.com/selik/xport/issues/44
+        pd = pytest.importorskip('pandas')
         df = pd.DataFrame({
             'a': pd.Series([None], dtype='string'),
             'b': [0],  # Avoid issue #46 by including a numeric column.
@@ -369,8 +374,7 @@ class TestEncode:
         for bad in invalid:
             library = xport.Library(xport.Dataset({'a': [bad]}))
             with pytest.raises(ValueError):
-                with pytest.warns(UserWarning, match=r'Converting column dtypes'):
-                    xport.v56.dumps(library)
+                xport.v56.dumps(library)
 
     def test_dumps_name_and_label_length_validation(self):
         """
@@ -394,11 +398,13 @@ class TestEncode:
         """
         Some text patterns have been trouble in the past.
         """
-        trouble = xport.Variable(["'<>"], dtype='string')
-        dataset = xport.Dataset({'a': trouble}, name='trouble')
+        pd = pytest.importorskip('pandas')
+        trouble = xport.Variable(["'<>"], dtype='string', native_namespace=pd)
+        dataset = xport.Dataset({'a': trouble}, name='trouble', native_namespace=pd)
         library = xport.Library(dataset)
-        with pytest.warns(UserWarning, match=r'Converting column dtypes'):
-            assert self.dump_and_load(library) == library
+        # No dtype conversion needed: pandas' 'string' dtype already maps
+        # to Narwhals' String.
+        assert_library_equal(self.dump_and_load(library), library, check_metadata=False)
 
     def test_dataset_created(self):
         invalid = datetime(1800, 1, 1)

@@ -9,10 +9,14 @@ import subprocess
 from io import StringIO
 
 # Community Packages
-import pandas as pd
+import pytest
 
 # Xport Modules
 import xport
+
+from test.conftest import assert_dataset_equal  # noqa: E402
+
+pytestmark = pytest.mark.cli
 
 
 def test_help():
@@ -51,19 +55,21 @@ def test_decode(library, library_bytestring):
     """
     Verify the command line executable can decode a library.
     """
+    pd = pytest.importorskip('pandas')
     cmd = 'python -m xport -'
     argv = cmd.split()
     proc = subprocess.run(argv, capture_output=True, input=library_bytestring)
     fp = StringIO(proc.stdout.decode())
     df = pd.read_csv(fp)
     ds = xport.Dataset(df)
-    assert (ds == next(iter(library.values()))).all(axis=None)
+    assert_dataset_equal(ds, next(iter(library.values())), check_metadata=False)
 
 
 def test_output_file(library, library_bytestring, tmp_path):
     """
     Verify CLI can write output to a file.
     """
+    pd = pytest.importorskip('pandas')
     filepath = tmp_path / 'tmp.csv'
     cmd = f'python -m xport - {filepath}'
     argv = cmd.split()
@@ -71,4 +77,4 @@ def test_output_file(library, library_bytestring, tmp_path):
     with open(filepath) as f:
         df = pd.read_csv(f)
     ds = xport.Dataset(df)
-    assert (ds == next(iter(library.values()))).all(axis=None)
+    assert_dataset_equal(ds, next(iter(library.values())), check_metadata=False)
