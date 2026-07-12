@@ -14,8 +14,9 @@ from collections.abc import Mapping, MutableMapping
 from datetime import datetime
 from io import StringIO
 
-# Community Packages
+import narwhals as nw
 import pandas as pd
+import polars as pl
 
 from .__about__ import __version__  # noqa: F401 module imported but unused
 
@@ -424,11 +425,11 @@ class Variable(pd.Series):
             self.vtype = VariableType.NUMERIC
 
 
-class Dataset(pd.DataFrame):
+class Dataset(nw.DataFrame):
     """
     SAS data set.
 
-    ``Dataset`` extends Pandas' ``DataFrame``, adding SAS metadata.
+    ``Dataset`` extends Narwhals' ``DataFrame``, adding SAS metadata.
     """
 
     _metadata = [
@@ -443,18 +444,11 @@ class Dataset(pd.DataFrame):
 
     def copy_metadata(self, other):
         """
-        Copy metadata from a Dataset or mapping of Variables.
+        Copy metadata from another Dataset.
         """
-        # LOG.debug(f'Copying metadata from {other}')  # BUG: Causes infinite recursion!
         if isinstance(other, Dataset):
             for name in self._metadata:
                 object.__setattr__(self, name, getattr(other, name, None))
-        if isinstance(other, (Dataset, Mapping)):
-            for k, v in self.items():
-                try:
-                    v.copy_metadata(other[k])
-                except KeyError:
-                    continue
 
     def __repr__(self):
         """REPL-format."""
@@ -463,7 +457,6 @@ class Dataset(pd.DataFrame):
         metadata = (f'{name}: {value}' for name, value in metadata.items() if value)
         template = '''\
             {cls} {name}
-            {variables_metadata}
 
             {super}
             {metadata}
@@ -471,9 +464,8 @@ class Dataset(pd.DataFrame):
         return textwrap.dedent(template).format(
             cls=type(self).__name__,
             name=self.name,
-            super=super().__repr__(),
+            super=repr(self.to_native()),
             metadata=', '.join(metadata),
-            variables_metadata=self.contents,
         )
 
     @property
@@ -487,10 +479,7 @@ class Dataset(pd.DataFrame):
     def __init__(
         self,
         data=None,
-        index=None,
-        columns=None,
-        dtype=None,
-        copy=False,
+        *,
         name=None,
         label=None,
         dataset_label=None,
@@ -499,10 +488,16 @@ class Dataset(pd.DataFrame):
         modified=None,
         sas_os=None,
         sas_version=None,
+        native_namespace=None,
         **kwds,
     ):
         """
         Initialize SAS dataset metadata.
+
+        ``data`` may be a native dataframe (e.g. a ``polars.DataFrame`` or
+        ``pandas.DataFrame``), another ``Dataset``, or a mapping/iterable of
+        columns, in which case ``native_namespace`` (default ``polars``)
+        determines which dataframe library backs the new ``Dataset``.
         """
         if dataset_label is not None:
             label = dataset_label
@@ -523,92 +518,49 @@ class Dataset(pd.DataFrame):
             'sas_version': sas_version,
             'dataset_type': dataset_type,
         }
-        super().__init__(data=data, index=index, columns=columns, dtype=dtype, copy=copy, **kwds)
-        for name, value in metadata.items():
-            if value is not None:
-                setattr(self, name, value)
-        self.copy_metadata(data)
-        for name, value in metadata.items():
-            setattr(self, name, getattr(self, name, value))
-        # LOG.debug(f'Initialized {self}')  # BUG: Causes infinite recursion!
-
-    def __finalize__(self, other, method=None, **kwds):
-        """
-        Propagate metadata to a copy.
-        """
-        # TODO: Is the call to super redundant?
-        self = super().__finalize__(other, method, **kwds)
-        if method == 'concat':
-            first, *rest = other.objs
-            source = first
-        elif method == 'merge':
-            source = other.left
+        ns = native_namespace or pl
+        if isinstance(data, Dataset):
+            native = data.to_native()
+        elif data is None:
+            native = ns.DataFrame(**kwds)
+        elif isinstance(data, Mapping):
+            native = ns.DataFrame(dict(data), **kwds)
         else:
-            source = other
-        self.copy_metadata(source)
-        LOG.debug(f'Finalized {self}')
-        return self
+            try:
+                native = nw.from_native(data, eager_only=True).to_native()
+            except TypeError:
+                # Not already a recognized native dataframe; treat it as
+                # column/row data to build one from scratch.
+                native = ns.DataFrame(data, **kwds)
+        wrapped = nw.from_native(native, eager_only=True)
+        super().__init__(wrapped._compliant_frame, level=wrapped._level)
+        for attr, value in metadata.items():
+            if value is not None:
+                setattr(self, attr, value)
+        self.copy_metadata(data)
+        for attr, value in metadata.items():
+            setattr(self, attr, getattr(self, attr, value))
+        LOG.debug(f'Initialized {self}')
 
-    def __setitem__(self, key, value):
+    def _from_compliant_dataframe(self, df):
         """
-        When inserting/updating a column, we must copy metadata.
+        Construct a new ``Dataset``, preserving SAS metadata.)``.
         """
-        # TODO: There are probably other ways Pandas adds columns to
-        #       a DataFrame.  We need to copy metadata in those, too.
-        old = self.iloc[:0].copy()
-        super().__setitem__(key, value)
-        if isinstance(value, Variable):
-            self[key].copy_metadata(value)
-        for k, v in old.items():
-            if k != key:
-                self[k].copy_metadata(v)
-
-    @property
-    def _constructor(self):
-        """
-        Construct an instance with the same dimensions as the original.
-        """
-        return Dataset
-
-    @property
-    def _constructor_sliced(self):
-        """
-        Construct an instance with one less dimension.
-
-        For example, slicing a single column from a dataframe.
-        """
-        return Variable
-
-    @property
-    def contents(self):
-        """
-        Variable metadata, such as label, format, number, and position.
-        """
-        df = pd.DataFrame({
-            'Variable': v.name,
-            'Type': v.vtype.name.title() if v.vtype is not None else '',
-            'Length': v.width,
-            'Format': str(v.format) if v.format is not None else '',
-            'Informat': str(v.informat) if v.informat is not None else '',
-            'Label': v.label if v.label is not None else '',
-        } for k, v in self.items())
-        if df.empty:
-            return df
-        df.index = df.index + 1
-        df.index.name = '#'
-        # BUG: Pandas Series.cumsum() seems to fail on its new Int type;
-        #      thus we have a redundant conversion to Int64Dtype.
-        df['Position'] = df['Length'].cumsum().astype(pd.Int64Dtype())
-        df['Length'] = df['Length'].fillna(pd.NA).astype(pd.Int64Dtype())
-        df.loc[1, 'Position'] = 0
-        return df
+        obj = object.__new__(Dataset)
+        nw.DataFrame.__init__(obj, df, level=self._level)
+        for attr in self._metadata:
+            setattr(obj, attr, getattr(self, attr, None))
+        return obj
 
     def infos(self):
         """
-        Like ``DataFrame.info`` but returns a string.
+        Summary of the dataset's columns and dtypes.
         """
         buf = StringIO()
-        self.info(buf=buf)
+        buf.write(f'{type(self).__name__}: {self.name}\n')
+        buf.write(f'Columns: {len(self.columns)}\n')
+        for col, dtype in self.schema.items():
+            buf.write(f'  {col}: {dtype}\n')
         buf.seek(0)
         return buf.read()
 
