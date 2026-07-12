@@ -289,9 +289,25 @@ class Variable(nw.Series):
         'label',
         'width',
         'vtype',
-        '_format',
-        '_informat',
+        'format',
+        'informat',
     ]
+
+    def _get_meta(self, key):
+        """
+        Read metadata, either from an attached ``Dataset`` column or locally.
+        """
+        dataset = self.__dict__.get('_dataset')
+        if dataset is not None:
+            return dataset._column_metadata.get(self.__dict__['_column'], {}).get(key)
+        return self.__dict__.get('_local_meta', {}).get(key)
+
+    def _set_meta(self, key, value):
+        dataset = self.__dict__.get('_dataset')
+        if dataset is not None:
+            dataset._column_metadata.setdefault(self.__dict__['_column'], {})[key] = value
+        else:
+            self.__dict__.setdefault('_local_meta', {})[key] = value
 
     def copy_metadata(self, other):
         """
@@ -300,10 +316,11 @@ class Variable(nw.Series):
         # LOG.debug(f'Copying metadata from {other}')  # BUG: Causes infinite recursion!
         if isinstance(other, Variable):
             for name in self._metadata:
-                value = getattr(self, name, None)
+                value = self._get_meta(name)
                 if value is None:
                     value = getattr(other, name, None)
-                object.__setattr__(self, name, value)
+                if value is not None:
+                    self._set_meta(name, value)
 
     def __repr__(self):
         """REPL-format."""
@@ -377,25 +394,40 @@ class Variable(nw.Series):
         """
         obj = object.__new__(Variable)
         nw.Series.__init__(obj, series, level=self._level)
-        for attr in self._metadata:
-            setattr(obj, attr, getattr(self, attr, None))
+        obj.__dict__['_local_meta'] = {name: self._get_meta(name) for name in self._metadata}
         return obj
+
+    label = property(
+        lambda self: self._get_meta('label'),
+        lambda self, value: self._set_meta('label', value),
+        doc='SAS variable label.',
+    )
+    width = property(
+        lambda self: self._get_meta('width'),
+        lambda self, value: self._set_meta('width', value),
+        doc='SAS variable width, in bytes.',
+    )
+    vtype = property(
+        lambda self: self._get_meta('vtype'),
+        lambda self, value: self._set_meta('vtype', value),
+        doc='SAS variable type, numeric or character.',
+    )
 
     @property
     def format(self):
         """
         SAS variable format.
         """
-        return self._format
+        return self._get_meta('format')
 
     @format.setter
     def format(self, value):
         if value is None:
-            self._format = None
+            self._set_meta('format', None)
         elif isinstance(value, Format):
-            self._format = value
+            self._set_meta('format', value)
         else:
-            self._format = Format.from_spec(value)
+            self._set_meta('format', Format.from_spec(value))
 
         if self.format and self.format.name.startswith('$'):
             self.vtype = VariableType.CHARACTER
@@ -407,16 +439,16 @@ class Variable(nw.Series):
         """
         SAS variable informat.
         """
-        return self._informat
+        return self._get_meta('informat')
 
     @informat.setter
     def informat(self, value):
         if value is None:
-            self._informat = None
+            self._set_meta('informat', None)
         elif isinstance(value, Informat):
-            self._informat = value
+            self._set_meta('informat', value)
         else:
-            self._informat = Informat.from_spec(value)
+            self._set_meta('informat', Informat.from_spec(value))
 
         if self.informat and self.informat.name.startswith('$'):
             self.vtype = VariableType.CHARACTER
@@ -523,7 +555,11 @@ class Dataset(nw.DataFrame):
         elif data is None:
             native = ns.DataFrame(**kwds)
         elif isinstance(data, Mapping):
-            native = ns.DataFrame(dict(data), **kwds)
+            columns = {
+                k: v.to_native() if isinstance(v, nw.Series) else v
+                for k, v in data.items()
+            }
+            native = ns.DataFrame(columns, **kwds)
         else:
             try:
                 native = nw.from_native(data, eager_only=True).to_native()
@@ -533,6 +569,17 @@ class Dataset(nw.DataFrame):
                 native = ns.DataFrame(data, **kwds)
         wrapped = nw.from_native(native, eager_only=True)
         super().__init__(wrapped._compliant_frame, level=wrapped._level)
+        self._column_metadata = {}
+        if isinstance(data, Dataset):
+            self._column_metadata = {k: dict(v) for k, v in data._column_metadata.items()}
+        elif isinstance(data, Mapping):
+            for k, v in data.items():
+                if isinstance(v, Variable):
+                    self._column_metadata[k] = {
+                        name: getattr(v, name)
+                        for name in Variable._metadata
+                        if getattr(v, name) is not None
+                    }
         for attr, value in metadata.items():
             if value is not None:
                 setattr(self, attr, value)
@@ -552,6 +599,7 @@ class Dataset(nw.DataFrame):
         nw.DataFrame.__init__(obj, df, level=self._level)
         for attr in self._metadata:
             setattr(obj, attr, getattr(self, attr, None))
+        obj._column_metadata = {k: dict(v) for k, v in self._column_metadata.items()}
         return obj
 
     @property
@@ -560,6 +608,39 @@ class Dataset(nw.DataFrame):
         The class used for a single column, e.g. ``ds['x']``.
         """
         return Variable
+
+    def __getitem__(self, item):
+        """
+        Get a column (attached, so its metadata round-trips) or a slice.
+        """
+        result = super().__getitem__(item)
+        if isinstance(result, Variable) and isinstance(item, str):
+            result.__dict__['_dataset'] = self
+            result.__dict__['_column'] = item
+        return result
+
+    def __setitem__(self, key, value):
+        """
+        Insert or replace a column, keeping its SAS metadata.
+        """
+        if isinstance(value, Variable):
+            metadata = {
+                name: getattr(value, name)
+                for name in Variable._metadata
+                if getattr(value, name) is not None
+            }
+            series = nw.from_native(value.to_native(), series_only=True)
+        elif isinstance(value, nw.Series):
+            metadata = {}
+            series = value
+        else:
+            metadata = {}
+            series = nw.new_series(key, list(value), native_namespace=self.__native_namespace__())
+        if series.name != key:
+            series = series.rename(key)
+        updated = self.with_columns(series)
+        self._compliant_frame = updated._compliant_frame
+        self._column_metadata[key] = metadata or self._column_metadata.get(key, {})
 
     def infos(self):
         """
@@ -593,8 +674,15 @@ class Library(MutableMapping):
         self.sas_version = sas_version
 
         # Convert a single dataset or dataframe to a collection of them.
-        if isinstance(members, pd.DataFrame):
-            members = {getattr(members, 'name', None): members}
+        if isinstance(members, Dataset):
+            members = {members.name: members}
+        elif not isinstance(members, (Library, Mapping)):
+            try:
+                nw.from_native(members, eager_only=True)
+            except TypeError:
+                pass
+            else:
+                members = {getattr(members, 'name', None): members}
 
         self._members = {}
         if isinstance(members, Library):
