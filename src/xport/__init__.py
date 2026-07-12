@@ -278,11 +278,16 @@ class Format(Informat):
 
 
 
-class Variable(nw.Series):
+class Variable:
     """
     SAS variable.
 
-    ``Variable`` extends Narwhals' ``Series``, adding SAS metadata.
+    ``Variable`` wraps a Narwhals ``Series``, adding SAS metadata. It
+    composes a ``nw.Series`` rather than subclassing it: Narwhals offers no
+    public subclassing hook, only private compliant-object internals
+    (``_compliant_series``, ``_level``) that aren't stable across versions.
+    Anything not defined here (``.dtype``, ``.str``, ``.to_list()``, etc.)
+    is delegated to the wrapped series via ``__getattr__``.
     """
 
     _metadata = [
@@ -353,18 +358,10 @@ class Variable(nw.Series):
             'format': format,
             'informat': informat,
         }
-        if hasattr(data, '__narwhals_series__'):
-            # Narwhals is reconstructing us internally, e.g. via
-            # ``ds['x']``: ``data`` is already a compliant series, not a
-            # native one, and ``kwds`` carries the ``level`` it wants.
-            super().__init__(data, **kwds)
-            for name, value in metadata.items():
-                if value is not None:
-                    setattr(self, name, value)
-            LOG.debug(f'Initialized {self}')
-            return
         ns = native_namespace or pl
         if isinstance(data, Variable):
+            native = data.to_native()
+        elif isinstance(data, nw.Series):
             native = data.to_native()
         elif data is None:
             native = ns.Series(name=name, values=[]) if ns is pl else ns.Series(name=name, dtype=None)
@@ -378,8 +375,8 @@ class Variable(nw.Series):
                 )
         if name is not None and native.name != name:
             native = native.rename(name)
-        wrapped = nw.from_native(native, series_only=True)
-        super().__init__(wrapped._compliant_series, level=wrapped._level)
+        self.__dict__['_series'] = nw.from_native(native, series_only=True)
+        self.__dict__['_local_meta'] = {}
         for name, value in metadata.items():
             if value is not None:
                 setattr(self, name, value)
@@ -388,14 +385,17 @@ class Variable(nw.Series):
             setattr(self, name, getattr(self, name, value))
         LOG.debug(f'Initialized {self}')
 
-    def _from_compliant_series(self, series):
+    def __getattr__(self, name):
         """
-        Construct a new ``Variable``, preserving SAS metadata.
+        Delegate to the wrapped Narwhals series, e.g. ``.dtype``, ``.str``.
         """
-        obj = object.__new__(Variable)
-        nw.Series.__init__(obj, series, level=self._level)
-        obj.__dict__['_local_meta'] = {name: self._get_meta(name) for name in self._metadata}
-        return obj
+        return getattr(self.__dict__['_series'], name)
+
+    def __getitem__(self, item):
+        return self.__dict__['_series'][item]
+
+    def __len__(self):
+        return len(self.__dict__['_series'])
 
     label = property(
         lambda self: self._get_meta('label'),
@@ -456,11 +456,15 @@ class Variable(nw.Series):
             self.vtype = VariableType.NUMERIC
 
 
-class Dataset(nw.DataFrame):
+class Dataset:
     """
     SAS data set.
 
-    ``Dataset`` extends Narwhals' ``DataFrame``, adding SAS metadata.
+    ``Dataset`` wraps a Narwhals ``DataFrame``, adding SAS metadata. Like
+    ``Variable``, it composes rather than subclasses Narwhals, for the same
+    reason: no public subclassing hook exists. Anything not defined here
+    (``.schema``, ``.filter()``, ``.iter_rows()``, etc.) is delegated to the
+    wrapped dataframe via ``__getattr__``.
     """
 
     _metadata = [
@@ -552,11 +556,13 @@ class Dataset(nw.DataFrame):
         ns = native_namespace or pl
         if isinstance(data, Dataset):
             native = data.to_native()
+        elif isinstance(data, nw.DataFrame):
+            native = data.to_native()
         elif data is None:
             native = ns.DataFrame(**kwds)
         elif isinstance(data, Mapping):
             columns = {
-                k: v.to_native() if isinstance(v, nw.Series) else v
+                k: v.to_native() if isinstance(v, (Variable, nw.Series)) else v
                 for k, v in data.items()
             }
             native = ns.DataFrame(columns, **kwds)
@@ -567,8 +573,7 @@ class Dataset(nw.DataFrame):
                 # Not already a recognized native dataframe; treat it as
                 # column/row data to build one from scratch.
                 native = ns.DataFrame(data, **kwds)
-        wrapped = nw.from_native(native, eager_only=True)
-        super().__init__(wrapped._compliant_frame, level=wrapped._level)
+        self.__dict__['_frame'] = nw.from_native(native, eager_only=True)
         self._column_metadata = {}
         if isinstance(data, Dataset):
             self._column_metadata = {k: dict(v) for k, v in data._column_metadata.items()}
@@ -588,35 +593,37 @@ class Dataset(nw.DataFrame):
             setattr(self, attr, getattr(self, attr, value))
         LOG.debug(f'Initialized {self}')
 
-    def _from_compliant_dataframe(self, df):
+    def __getattr__(self, name):
         """
-        Construct a new ``Dataset``, preserving SAS metadata.
+        Delegate to the wrapped Narwhals dataframe, e.g. ``.schema``.
+        """
+        return getattr(self.__dict__['_frame'], name)
 
-        This is Narwhals' hook (analogous to Pandas' ``_constructor``) for
-        building the result of operations like ``.select()``/``.filter()``.
+    def _wrap(self, frame):
         """
-        obj = object.__new__(Dataset)
-        nw.DataFrame.__init__(obj, df, level=self._level)
+        Construct a new ``Dataset`` (or subclass) around ``frame``,
+        preserving SAS metadata.
+        """
+        obj = object.__new__(type(self))
+        obj.__dict__['_frame'] = frame
         for attr in self._metadata:
             setattr(obj, attr, getattr(self, attr, None))
         obj._column_metadata = {k: dict(v) for k, v in self._column_metadata.items()}
         return obj
 
-    @property
-    def _series(self):
-        """
-        The class used for a single column, e.g. ``ds['x']``.
-        """
-        return Variable
-
     def __getitem__(self, item):
         """
         Get a column (attached, so its metadata round-trips) or a slice.
         """
-        result = super().__getitem__(item)
-        if isinstance(result, Variable) and isinstance(item, str):
+        if isinstance(item, str):
+            result = object.__new__(Variable)
+            result.__dict__['_series'] = self._frame[item]
             result.__dict__['_dataset'] = self
             result.__dict__['_column'] = item
+            return result
+        result = self._frame[item]
+        if isinstance(result, nw.DataFrame):
+            return self._wrap(result)
         return result
 
     def __setitem__(self, key, value):
@@ -629,18 +636,30 @@ class Dataset(nw.DataFrame):
                 for name in Variable._metadata
                 if getattr(value, name) is not None
             }
-            series = nw.from_native(value.to_native(), series_only=True)
+            series = value.__dict__['_series']
         elif isinstance(value, nw.Series):
             metadata = {}
             series = value
         else:
             metadata = {}
-            series = nw.new_series(key, list(value), native_namespace=self.__native_namespace__())
+            series = nw.new_series(key, list(value), native_namespace=self._frame.__native_namespace__())
         if series.name != key:
             series = series.rename(key)
-        updated = self.with_columns(series)
-        self._compliant_frame = updated._compliant_frame
+        self.__dict__['_frame'] = self._frame.with_columns(series)
         self._column_metadata[key] = metadata or self._column_metadata.get(key, {})
+
+    def items(self):
+        """
+        Iterate over ``(column name, Variable)`` pairs.
+        """
+        for name in self.columns:
+            yield name, self[name]
+
+    def with_columns(self, *exprs, **named_exprs):
+        """
+        Add or replace columns, preserving SAS metadata and ``Dataset`` type.
+        """
+        return self._wrap(self._frame.with_columns(*exprs, **named_exprs))
 
     def infos(self):
         """
@@ -816,7 +835,7 @@ def to_rows(fp):
     parsed from the XPT metadata.
     """
     df = to_dataframe(fp)
-    return list(df.itertuples(index=False, name=None))
+    return list(df.iter_rows(named=False))
 
 
 def to_columns(fp):
@@ -829,7 +848,7 @@ def to_columns(fp):
     bytes-mode.
     """
     dataset = to_dataframe(fp)
-    return {k: v for k, v in dataset.items()}
+    return {k: dataset[k].to_list() for k in dataset.columns}
 
 
 def to_numpy(fp):
@@ -841,17 +860,23 @@ def to_numpy(fp):
     encoded in their own special format, the ``fp`` object must be in
     bytes-mode.
     """
-    return to_dataframe(fp).values
+    return to_dataframe(fp).to_numpy()
 
 
 def to_dataframe(fp):
     """
-    Read a file in SAS XPT format and return a Pandas DataFrame.
+    Read a file in SAS XPT format and return a ``Dataset``.
 
     Deserialize ``fp`` (a ``.read()``-supporting file-like object
     containing an XPT document) to a list of rows. As XPT files are
     encoded in their own special format, the ``fp`` object must be in
     bytes-mode.
+
+    .. deprecated::
+        Despite the name, this no longer returns a Pandas ``DataFrame``
+        specifically -- it returns an ``xport.Dataset``, which wraps
+        whichever dataframe library you're using (Polars by default).
+        Use ``xport.v56.load`` instead.
     """
     # Avoid circular import problems.
     # Xport Modules

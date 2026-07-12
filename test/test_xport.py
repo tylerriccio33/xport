@@ -14,6 +14,8 @@ import pytest
 # Xport Modules
 import xport
 
+from test.conftest import assert_dataset_equal  # noqa: E402
+
 
 class TestNaN:
     """
@@ -274,23 +276,23 @@ class TestLegacy:
 
     def test_from_columns(self, library):
         ds = next(iter(library.values()))
-        mapping = {k: v for k, v in ds.items()}
+        mapping = {k: v.to_native() for k, v in zip(ds.columns, (ds[c] for c in ds.columns))}
         fp = BytesIO()
         with pytest.warns(DeprecationWarning):
             xport.from_columns(mapping, fp)
         fp.seek(0)
         result = next(iter(xport.v56.load(fp).values()))
-        assert (result == ds).all(axis=None)
+        assert_dataset_equal(result, ds, check_metadata=False)
 
     def test_from_rows(self, library):
         ds = next(iter(library.values()))
-        rows = list(ds.itertuples(index=None, name=None))
+        rows = list(ds.iter_rows(named=False))
         fp = BytesIO()
         with pytest.warns(DeprecationWarning):
             xport.from_rows(rows, fp)
         fp.seek(0)
         result = next(iter(xport.v56.load(fp).values()))
-        assert (result.values == ds.values).all(axis=None)
+        assert_dataset_equal(result, ds, check_metadata=False)
 
     def test_from_dataframe(self, library):
         ds = next(iter(library.values()))
@@ -299,34 +301,33 @@ class TestLegacy:
             xport.from_dataframe(ds, fp)
         fp.seek(0)
         result = next(iter(xport.v56.load(fp).values()))
-        assert (result == ds).all(axis=None)
+        assert_dataset_equal(result, ds, check_metadata=False)
 
     def test_to_rows(self, library, library_bytestring):
         ds = next(iter(library.values()))
         fp = BytesIO(library_bytestring)
         with pytest.warns(DeprecationWarning):
             result = xport.to_rows(fp)
-        df = pd.DataFrame(result)
-        assert (df.values == ds.values).all(axis=None)
+        assert result == list(ds.iter_rows(named=False))
 
     def test_to_columns(self, library, library_bytestring):
         ds = next(iter(library.values()))
         fp = BytesIO(library_bytestring)
         with pytest.warns(DeprecationWarning):
             result = xport.to_columns(fp)
-        df = pd.DataFrame(result)
-        assert (df == ds).all(axis=None)
+        expected = {c: ds[c].to_list() for c in ds.columns}
+        assert {k: list(v) for k, v in result.items()} == expected
 
     def test_to_numpy(self, library, library_bytestring):
         ds = next(iter(library.values()))
         fp = BytesIO(library_bytestring)
         with pytest.warns(DeprecationWarning):
             result = xport.to_numpy(fp)
-        assert (result == ds.values).all(axis=None)
+        assert (result == ds.to_numpy()).all()
 
     def test_to_dataframe(self, library, library_bytestring):
         ds = next(iter(library.values()))
         fp = BytesIO(library_bytestring)
         with pytest.warns(DeprecationWarning):
             result = xport.to_dataframe(fp)
-        assert (result == ds).all(axis=None)
+        assert_dataset_equal(result, ds, check_metadata=False)
