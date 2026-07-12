@@ -152,10 +152,21 @@ class Namestr:
         elif vtype == xport.VariableType.NUMERIC:
             length = 8
         else:
-            # ``TEXT_DATA_ENCODING`` (ISO-8859-1) is single-byte, so the
-            # character count equals the encoded byte count.
+            # Width is the encoded byte count, which can exceed the
+            # character count for multi-byte encodings (e.g. UTF-8).
             # TODO: Avoid this pass, since ``Observations`` re-scans too.
-            length = variable.str.len_chars().max()
+            def encoded_length(v):
+                try:
+                    return len(v.encode(TEXT_DATA_ENCODING))
+                except UnicodeEncodeError:
+                    # Leave it to the actual write step to raise; here we
+                    # just need a stand-in width.
+                    return len(v)
+
+            length = max(
+                (encoded_length(v) for v in variable.to_list() if isinstance(v, str)),
+                default=0,
+            )
         try:
             length = max(1, length)  # We need at least 1 byte per value.
         except TypeError:

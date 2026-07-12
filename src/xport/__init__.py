@@ -278,6 +278,26 @@ class Format(Informat):
 
 
 
+def _coerce_unknown_dtypes(frame_or_series):
+    """
+    Narwhals reports pandas' native ``str`` dtype (pandas >= 2.something's
+    ``pd.StringDtype``-like default) as ``Unknown``. Downcast such columns
+    to ``object`` so Narwhals can infer them as ``String`` instead.
+    """
+    if frame_or_series.implementation.name != 'PANDAS':
+        return frame_or_series
+    if isinstance(frame_or_series, nw.Series):
+        if frame_or_series.dtype == nw.Unknown:
+            native = frame_or_series.to_native().astype(object)
+            return nw.from_native(native, series_only=True)
+        return frame_or_series
+    unknown_columns = [name for name, dtype in frame_or_series.schema.items() if dtype == nw.Unknown]
+    if not unknown_columns:
+        return frame_or_series
+    native = frame_or_series.to_native().astype({name: object for name in unknown_columns})
+    return nw.from_native(native, eager_only=True)
+
+
 class Variable:
     """
     SAS variable.
@@ -375,7 +395,7 @@ class Variable:
                 )
         if name is not None and native.name != name:
             native = native.rename(name)
-        self.__dict__['_series'] = nw.from_native(native, series_only=True)
+        self.__dict__['_series'] = _coerce_unknown_dtypes(nw.from_native(native, series_only=True))
         self.__dict__['_local_meta'] = {}
         for name, value in metadata.items():
             if value is not None:
@@ -396,6 +416,34 @@ class Variable:
 
     def __len__(self):
         return len(self.__dict__['_series'])
+
+    def copy(self):
+        """
+        Copy the variable, keeping its SAS metadata.
+        """
+        return Variable(self)
+
+    def append(self, other):
+        """
+        Concatenate with another variable-like object, keeping SAS metadata.
+        """
+        if isinstance(other, Variable):
+            other_native = other.to_native()
+        elif isinstance(other, nw.Series):
+            other_native = other.to_native()
+        else:
+            other_native = other
+        other_series = nw.from_native(other_native, series_only=True)
+        this_series = self._series
+        if this_series.dtype != other_series.dtype:
+            common = other_series.dtype if len(this_series) == 0 else this_series.dtype
+            this_series = this_series.cast(common)
+            other_series = other_series.cast(common)
+        ns = this_series.__native_namespace__()
+        native = ns.concat([this_series.to_native(), other_series.to_native()])
+        result = Variable(native)
+        result.copy_metadata(self)
+        return result
 
     label = property(
         lambda self: self._get_meta('label'),
@@ -573,7 +621,7 @@ class Dataset:
                 # Not already a recognized native dataframe; treat it as
                 # column/row data to build one from scratch.
                 native = ns.DataFrame(data, **kwds)
-        self.__dict__['_frame'] = nw.from_native(native, eager_only=True)
+        self.__dict__['_frame'] = _coerce_unknown_dtypes(nw.from_native(native, eager_only=True))
         self._column_metadata = {}
         if isinstance(data, Dataset):
             self._column_metadata = {k: dict(v) for k, v in data._column_metadata.items()}
@@ -660,6 +708,55 @@ class Dataset:
         Add or replace columns, preserving SAS metadata and ``Dataset`` type.
         """
         return self._wrap(self._frame.with_columns(*exprs, **named_exprs))
+
+    def copy(self):
+        """
+        Copy the dataset, keeping its SAS metadata.
+        """
+        return self._wrap(self._frame)
+
+    def append(self, other):
+        """
+        Concatenate with another dataset-like object, keeping SAS metadata.
+        """
+        if isinstance(other, Dataset):
+            other_native = other.to_native()
+        elif isinstance(other, nw.DataFrame):
+            other_native = other.to_native()
+        else:
+            other_native = other
+        other_frame = nw.from_native(other_native, eager_only=True)
+        if other_frame.implementation != self._frame.implementation:
+            ns = self._frame.__native_namespace__()
+            other_frame = nw.from_native(
+                ns.DataFrame(other_frame.to_dict(as_series=False)), eager_only=True
+            )
+        combined = nw.concat([self._frame, other_frame], how='vertical')
+        return self._wrap(combined)
+
+    @property
+    def contents(self):
+        """
+        Variable metadata, such as label, format, number, and position.
+        """
+        df = pd.DataFrame({
+            'Variable': v.name,
+            'Type': v.vtype.name.title() if v.vtype is not None else '',
+            'Length': v.width,
+            'Format': str(v.format) if v.format is not None else '',
+            'Informat': str(v.informat) if v.informat is not None else '',
+            'Label': v.label if v.label is not None else '',
+        } for k, v in self.items())
+        if df.empty:
+            return df
+        df.index = df.index + 1
+        df.index.name = '#'
+        # BUG: Pandas Series.cumsum() seems to fail on its new Int type;
+        #      thus we have a redundant conversion to Int64Dtype.
+        df['Position'] = df['Length'].cumsum().astype(pd.Int64Dtype())
+        df['Length'] = df['Length'].fillna(pd.NA).astype(pd.Int64Dtype())
+        df.loc[1, 'Position'] = 0
+        return df[['Variable', 'Type', 'Length', 'Position', 'Format', 'Informat', 'Label']]
 
     def infos(self):
         """

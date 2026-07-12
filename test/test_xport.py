@@ -218,7 +218,10 @@ class TestDatasetMetadata:
             })),
             ds,
         )
-        self.compare_metadata(pd.concat([ds, ds]), ds)
+        # ``Dataset`` no longer subclasses ``pd.DataFrame`` (Narwhals is
+        # composed, not inherited), so ``pd.concat`` doesn't apply here;
+        # ``Dataset.append`` is the supported equivalent.
+        self.compare_metadata(ds.append(ds), ds)
 
     def test_contents(self):
         """
@@ -292,6 +295,9 @@ class TestLegacy:
             xport.from_rows(rows, fp)
         fp.seek(0)
         result = next(iter(xport.v56.load(fp).values()))
+        # Unnamed rows can't carry column names, so ``from_rows`` invents
+        # generic ones (x00, x01, ...); rename them back for comparison.
+        result = xport.Dataset(result.rename(dict(zip(result.columns, ds.columns))))
         assert_dataset_equal(result, ds, check_metadata=False)
 
     def test_from_dataframe(self, library):

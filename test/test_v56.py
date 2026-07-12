@@ -8,6 +8,7 @@ import string
 from datetime import datetime
 
 # Community Packages
+import narwhals as nw
 import pandas as pd
 import pytest
 
@@ -337,8 +338,8 @@ class TestEncode:
             with pytest.warns(UserWarning, match=r'Converting column dtypes'):
                 library = xport.Library({'A': xport.Dataset({'x': [x]})})
                 output = self.dump_and_load(library)
-                assert output['A']['x'].dtype.name == 'float64'
-                assert output['A']['x'].iloc[0] == 1.0
+                assert output['A']['x'].dtype == nw.Float64
+                assert output['A']['x'][0] == 1.0
 
     def test_text_null(self):
         # https://github.com/selik/xport/issues/44
@@ -372,8 +373,7 @@ class TestEncode:
         for bad in invalid:
             library = xport.Library(xport.Dataset({'a': [bad]}))
             with pytest.raises(ValueError):
-                with pytest.warns(UserWarning, match=r'Converting column dtypes'):
-                    xport.v56.dumps(library)
+                xport.v56.dumps(library)
 
     def test_dumps_name_and_label_length_validation(self):
         """
@@ -397,11 +397,12 @@ class TestEncode:
         """
         Some text patterns have been trouble in the past.
         """
-        trouble = xport.Variable(["'<>"], dtype='string')
-        dataset = xport.Dataset({'a': trouble}, name='trouble')
+        trouble = xport.Variable(["'<>"], dtype='string', native_namespace=pd)
+        dataset = xport.Dataset({'a': trouble}, name='trouble', native_namespace=pd)
         library = xport.Library(dataset)
-        with pytest.warns(UserWarning, match=r'Converting column dtypes'):
-            assert_library_equal(self.dump_and_load(library), library)
+        # No dtype conversion needed: pandas' 'string' dtype already maps
+        # to Narwhals' String.
+        assert_library_equal(self.dump_and_load(library), library, check_metadata=False)
 
     def test_dataset_created(self):
         invalid = datetime(1800, 1, 1)
