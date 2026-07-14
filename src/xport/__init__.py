@@ -4,7 +4,6 @@ Read and write SAS XPORT/XPT-format files.
 
 # Standard Library
 import enum
-import importlib
 import logging
 import re
 import string
@@ -297,24 +296,10 @@ def _coerce_unknown_dtypes(frame_or_series):
     return nw.from_native(native, eager_only=True)
 
 
-def _default_backend():
-    """
-    Pick a native dataframe library to build a frame from scratch with,
-    when the caller hasn't supplied one (e.g. ``Dataset()``, ``Dataset({...})``).
-    """
-    for getter in (nw.dependencies.get_polars, nw.dependencies.get_pandas):
-        module = getter()
-        if module is not None:
-            return module
-    for name in ('polars', 'pandas'):
-        try:
-            return importlib.import_module(name)
-        except ImportError:
-            continue
-    raise ImportError(
-        'xport needs Polars or Pandas installed to build a dataset from plain '
-        'Python data; install one of them, e.g. `pip install polars`.'
-    )
+#: Backend used to build a frame from scratch when the caller hasn't
+#: supplied a ``native_namespace`` (e.g. ``Dataset()``, ``Dataset({...})``).
+#: Set this to a backend name (e.g. ``'pandas'``) if Polars isn't installed.
+DEFAULT_BACKEND = 'polars'
 
 
 def _resolve_native_namespace(backend=None):
@@ -325,7 +310,7 @@ def _resolve_native_namespace(backend=None):
     ourselves.
     """
     if backend is None:
-        return _default_backend()
+        backend = DEFAULT_BACKEND
     if hasattr(backend, 'DataFrame'):
         return backend
     return nw.Implementation.from_backend(backend).to_native_namespace()
